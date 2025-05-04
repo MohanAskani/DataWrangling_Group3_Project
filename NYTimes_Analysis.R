@@ -98,7 +98,10 @@ nytimes_processed <- us_news %>%
 dim(nytimes_processed)
 # Save to CSV if needed
 #write_csv(nytimes_processed, "nytimes_processed.csv")
+write.csv(as.data.frame(nytimes_processed) , file = "newyorktimes_news_v1.csv", row.names = FALSE, quote = TRUE)
 
+# Find out most discussed topics in NY Times
+# Tokenization starts (Uni-grams and Bi-grams)
 tokenisation_standardisation_unigrams <- function(df){
   df <- df %>% 
     unnest_tokens(word, cleaned_body) %>% # Tokenization of the cleaned text of body
@@ -109,7 +112,7 @@ tokenisation_standardisation_unigrams <- function(df){
 }
 nytimes_data_tokenized <- tokenisation_standardisation_unigrams(nytimes_processed)
 
-# Topic Coverage Analysis based on Uni-grams
+# Analyze frequently discussed topics based on Uni-grams
 top_unigrams <- nytimes_data_tokenized %>%
   count(publisher, lemma, sort = TRUE) %>%
   group_by(publisher) %>%
@@ -144,7 +147,7 @@ tokenisation_standardisation_bigrams <- function(df) {
 }
 nytimes_data_tokenized_bigrams <- tokenisation_standardisation_bigrams(nytimes_processed)
 
-# Topic Coverage Analysis based on Bi-grams
+# Analyze frequently discussed topics based on Bi-grams
 top_bigrams <- nytimes_data_tokenized_bigrams %>%
   count(publisher, bigram, sort = TRUE) %>%
   group_by(publisher) %>%
@@ -159,3 +162,37 @@ p2 <- top_bigrams %>%
   labs(title = "Top BiGrams in The New York Times Articles by Publisher (Last 30 Days)",
        x = "BiGram", y = "Frequency")
 grid.arrange(p1, p2, ncol = 2)
+
+
+# Dowloading sentiment lexicons
+sentiment_words_bing <- get_sentiments("bing")
+sentiment_words_nrc <- get_sentiments("nrc")
+
+# Measuring sentiment of the articles (based on bing lexicon)
+article_sentiment <- nytimes_processed %>%
+  unnest_tokens(word, cleaned_body) %>%
+  inner_join(sentiment_words_bing, by = "word") %>%
+  count(publisher, sentiment) %>%
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>%
+  mutate(net_sentiment = positive - negative)
+
+# Plot of the Net Sentiment of The NY Times Articles
+ggplot(article_sentiment, aes(x = publisher, y = net_sentiment, fill = publisher)) +
+  geom_col(show.legend = FALSE) +
+  labs(title = "Net Sentiment of Articles by Publisher",
+       y = "Net Sentiment (Positive - Negative)", x = "Publisher")
+
+# Measuring the sentiment of articles by day
+sentiment_by_day <- nytimes_processed %>%
+  unnest_tokens(word, cleaned_body) %>%
+  inner_join(sentiment_words_bing, by = "word") %>%
+  count(pub_date, publisher, sentiment) %>%
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>%
+  mutate(net_sentiment = positive - negative)
+
+# Plot of the Sentiment of The NY Times Articles by Day
+ggplot(sentiment_by_day, aes(x = pub_date, y = net_sentiment)) +
+  geom_line(linewidth = 1.1) +
+  labs(title = "Net Sentiment Over Time (NY Times)",
+       x = "Date", y = "Net Sentiment (Positive - Negative)") +
+  theme_minimal()
