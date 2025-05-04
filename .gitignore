@@ -2,4 +2,8 @@
 .Rhistory
 .RData
 .Ruserdata
+<<<<<<< HEAD
 .Renviron
+=======
+.Renviron
+>>>>>>> ea314bba135ea45d80067cb4d31cc36abac846b9
