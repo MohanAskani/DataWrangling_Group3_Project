@@ -1,0 +1,654 @@
+---
+title: "Media Matters: Text-Based Analysis of How The Guardian and The New York Times
+  Cover US News"
+---
+
+<h4 class="author">Mohan Krishna Askani and Naveen Korrapati</h4>
+<h4 class="instructor">Instructor: Stevenson Bolivar Atuesta</h4>
+<h4 class="date">May 6, 2025</h4>
+
+```{=html}
+<style type="text/css">
+
+h1.title {
+  font-size: 18px;
+  color: DarkBlack;
+  text-align: center;
+}
+h4.author { /* Header 4 - and the author and data headers use this too  */
+    font-size: 16px;
+  font-family: "Times New Roman", Times, serif;
+  color: DarkBlack;
+  text-align: center;
+}
+h4.instructor { /* Header 4 - and the author and data headers use this too  */
+    font-size: 16px;
+  font-family: "Times New Roman", Times, serif;
+  color: DarkBlack;
+  text-align: center;
+}
+h4.date { /* Header 4 - and the author and data headers use this too  */
+  font-size: 16px;
+  font-family: "Times New Roman", Times, serif;
+  color: DarkBlack;
+  text-align: center;
+}
+</style>
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Objective \
+
+  Our project aims to compare topic emphasis between two prominent publishers: **The New York Times**, a leading U.S.based outlet, and **The Guardian**, a UK-based publication with a dedicated **U.S. news section** by examining the thematic focus, sentiment patterns, and geographic distribution of coverage in their national news articles related to the United States using topic modeling, TF-IDF (Term-Frequency Inverse-Document Frequency), sentiment analysis, and location-based insights based on the data for April 2025.
+    
+  This analysis is valuable because it highlights how two influential but geographically and editorially distinct publishers **The New York Times (U.S.)** and **The Guardian (UK)** cover news related to the United States. Even when reporting on similar national topics, outlets may diverge in story selection, linguistic framing, and emphasis, shaped by their editorial mission, cultural context, or intended readership. By analyzing such differences, we can gain insights into not just what is reported, but how and why it is framed in particular ways. 
+This work may benefit:
+
+- **Media Analysts & Journalists**: To examine how transatlantic outlets differ in their editorial tone, topical focus, and choice of language when covering U.S. issues.
+
+- **News Consumers**: To enhance media literacy by showing how coverage can subtly vary depending on the outlet, encouraging critical engagement with diverse sources.
+
+- **Data Scientists & NLP Researchers**: To support modeling efforts that detect bias, framing, or discourse patterns in real-world journalism. It also offers a practical use case for TF-IDF and other text processing techniques across media domains.
+
+# Data Extraction and Cleaning
+  **The Guardian:** \
+  The data from The Guardian came through their API, which made things a little easier. It gave us the full article body, but it was still wrapped in HTML tags. So we had to clean that up by removing all the tags, links, numbers, punctuation, etc.,. One small issue was that some sentences still had odd punctuation or repeated breaks, so we had to fix spacing and make sure the text looked like normal paragraphs. Also, words like “Trump’s” or “don’t” showed up as “trumps” or “dont” after cleaning, so we created a custom function to cut off possessive endings and just keep the actual word.
+  
+```{r, message=FALSE, warning=FALSE}
+# loading required libraries
+library(rvest)
+library(readr)
+library(tidyverse)
+library(httr)
+```
+
+```{r, eval=FALSE}
+# The Guardian API Key
+gaurdian_api_key <- Sys.getenv("Gaurdian_API_Key")
+
+# Function to pull The Guardian articles for a section/date range
+get_gaurdian_articles <- function(section = "us-news", 
+                                  from = floor_date(Sys.Date() - months(1), unit = "month"),
+                                  to = ceiling_date(Sys.Date() - months(1), unit = "month") - days(1),
+                                  pages = 2) {
+  all_articles <- list()
+  for (i in 1:pages) {
+    res <- GET("https://content.guardianapis.com/search", query = list(
+      section = section,
+      "from-date" = format(from, "%Y-%m-%d"),
+      "to-date" = format(to, "%Y-%m-%d"),
+      "show-fields" = "headline,trailText,body",
+      "page-size" = 150,
+      "page" = i,
+      "api-key" = gaurdian_api_key
+    ))
+    
+    content_json <- fromJSON(content(res, "text"), flatten = TRUE)
+    articles <- content_json$response$results
+    
+    if (length(articles) == 0) break  # Stop if empty
+    
+    df <- tibble(
+      title = articles$fields.headline,
+      summary = articles$fields.trailText,
+      body = articles$fields.body,
+      date = as.Date(articles$webPublicationDate),
+      url = articles$webUrl,
+      section = articles$sectionName
+    )
+    
+    all_articles[[i]] <- df
+  }
+  
+  bind_rows(all_articles)
+}
+
+# Pulling the News Articles Data
+guardian_news <- get_gaurdian_articles(section = "us-news", pages = 100)
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Saving the File
+# write.csv(as.data.frame(gaurdian_news) , file = "gaurdian_news_v2.csv", row.names = FALSE, quote = TRUE)
+guardian_news <- read_csv("guardian_news_v2.csv")
+
+# Custom cleaning function
+text_clean_function_guardian <- function(raw_text) {
+  cleaned_text <- read_html(raw_text) %>%
+    html_text2() %>% # Extract clean text (preserves paragraph breaks)
+    str_to_lower() %>% # converts word to lower case
+    str_replace_all("\\b(\\w+)(['’]s)\\b", "\\1") %>% # Handling Possessive forms (Car's, Trump's etc.,)
+    str_squish() %>% # Remove excessive white space
+    
+    # Remove numbers (standalone or within words like "covid19")
+    str_replace_all("\\b\\w*\\d+\\w*\\b", "") %>%
+    
+    str_replace_all("[[:punct:]]", " ") %>% # Removing Punctuation
+    str_squish() # Remove excessive white space
+    
+  return(cleaned_text) 
+}
+
+guardian_news <- guardian_news %>% mutate(cleaned_body = map_chr(body, text_clean_function_guardian))
+
+print(guardian_news$body[2])
+print(guardian_news$cleaned_body[2])
+```
+
+  **The New York Times:** \
+  This one was a bit more tricky. We got the metadata using the NYT Article Search API, but the article body wasn’t included, so we had to scrape it manually using the links. The problem was, almost all articles not loaded properly and they just showed a message like "We are having trouble retrieving the article content." This is because the articles are behind a dynamic javascript rendering layer, which prevents full content from loading during static HTML scraping. We also cleaned up the text by removing HTML tags, fixing strange line breaks, and getting rid of extra junk like bylines or image captions. In the end, we kept the articles that had at least 300 words of actual content, which was good enough for meaningful analysis.
+  
+```{r, eval=FALSE}
+
+# Calling New York Times API through curl
+system('curl -s -o nyt-2025-4.json "https://api.nytimes.com/svc/archive/v1/2025/4.json?api-key=3MBRKQHHWDYuuAeX9QpkVd95XlrPBjCR"')
+
+# Adjust path as needed
+json_data <- fromJSON("nyt-2025-4.json", flatten = TRUE)
+
+# Extract articles
+docs <- json_data$response$docs
+
+# Extract only US section News 
+us_news <- docs %>% filter(section_name %in% c('U.S.') & type_of_material == 'News')
+
+# Extract body function from page URLs
+body_extraction <- function(url) {
+  page <- read_html(url)
+  paragraphs <- page %>% html_elements("p") %>% html_text2()
+  clean_text <- paste(paragraphs, collapse = " ")
+  return(clean_text)
+}
+
+# Call body extract function and store output in full_body (stored only those with atleast 300 characters)
+us_news <- us_news %>% mutate(raw_body = map_chr(web_url, body_extraction)) %>% filter(nchar(raw_body) >= 300)
+
+# Full body cleaning function starts
+clean_full_body <- function(text) {
+  if (is.null(text) || is.na(text) || !is.character(text)) return("")
+  cleaned <- text %>%
+    gsub("(?:'|’)[sS]\\b", "", .) %>%
+    # Remove the specific problematic sentence (all variations)
+    gsub("We are having trouble retrieving the article content\\..*?(Log in\\.|Subscribe\\.|Advertisement)", "", ., perl = TRUE) %>%
+    # Your existing cleaning steps
+    gsub("(?i)Advertisement", "", .) %>%
+    gsub("(?i)Please enable JavaScript in your browser settings", "", .) %>%
+    gsub("(?i)while we verify access", "", .) %>%
+    gsub("(?i)please exit and log into your Times account, or subscribe for all of The Times\\.", "", .) %>%
+    gsub("(?i)Supported by", "", .) %>%
+    gsub("(?i)Thank you for your patience.*?(Advertisement)?", "", ., perl = TRUE) %>%
+    gsub("(?i)If you are in Reader mode.*?(Advertisement)?", "", ., perl = TRUE) %>%
+    gsub("(?i)Already a subscriber\\? Log in\\.", "", .) %>%
+    gsub("(?i)Want all of The Times\\? Subscribe\\.", "", .) %>%
+    gsub("(?i)^By [A-Z][a-z]+ [A-Z][a-z]+( and [A-Z][a-z]+ [A-Z][a-z]+)?", "", .) %>%
+    gsub("(?i)[A-Z][a-z]+ [A-Z][a-z]+ (reported from|covers|writes).*?\\.", "", .) %>%
+    gsub("\\[.*?\\]", "", .) %>%
+    gsub("[^A-Za-z .,!?]", " ", .) %>%
+    gsub("\n", " ", .)
+  return(cleaned)
+}
+
+# Call clean full body function and store output in cleaned_body
+us_news <- us_news %>% mutate(cleaned_body = map_chr(raw_body, clean_full_body))
+```
+
+```{r, message=FALSE}
+# Saving the File
+# write.csv(as.data.frame(us_news) , file = "newyorktimes_news_v1.csv", row.names = FALSE, quote = TRUE)
+nyt_news <- read_csv("newyorktimes_news_v1.csv")
+
+print(nyt_news$raw_body[1]) # sample raw body of the article
+print(nyt_news$cleaned_body[1]) # sample cleaned body of the article
+```
+  
+# Data Structuring 
+  Both datasets are ultimately standardized into a common schema containing publisher name, published date, and cleaned article body to enable a balanced and comparable analysis of news coverage across the two sources.
+
+```{r, message=FALSE, warning=FALSE}
+# loading required libraries
+library(dplyr)
+library(tidytext)
+library(textstem)
+library(ggplot2)
+library(stringr)
+library(tidyr)
+
+guardian_news <- guardian_news %>% mutate(publisher = "The Guardian") %>% rename(pub_date = date)
+
+# merging both the datasets
+combined_news <- bind_rows(
+  guardian_news %>% select(publisher, pub_date, cleaned_body),
+  nyt_news %>% select(publisher, pub_date, cleaned_body)
+)
+```
+
+# Analysis & Insights
+  As outlined in the objective, our analysis focused on comparing recent U.S. news coverage from The New York Times and The Guardian. We explored differences in their reporting through multiple lenses, including vocabulary, sentiment, and geographic focus.
+  
+## Topic Coverage
+  To examine how each publisher emphasizes different themes, we performed topic analysis using three complementary approaches:
+
+- Top Unigrams: The most frequent individual words used in each publisher's articles
+
+- Top Bigrams: The most common two-word phrases to capture recurring themes
+
+- TF-IDF: To identify words that are uniquely important to one publisher relative to the other
+
+These methods together helped us highlight both shared and distinctive topics in their national news reporting.
+
+### Top Unigrams
+```{r}
+# Tokenization and Normalization (unigrams)
+tokenisation_standardisation_unigrams <- function(df){
+  df <- df %>% 
+    unnest_tokens(word, cleaned_body) %>% # Tokenization of the cleaned text of body
+    filter(str_length(word) >= 4) %>% # Removing words with length < 4
+    anti_join(stop_words, by = "word") %>% # Handling stopwords
+    filter(str_detect(word, "^[a-z]+$")) %>%  # considering only alphabets
+    mutate(lemma = lemmatize_words(word)) # Reducing the words to its base form
+}
+
+# Tokenization and Standardisation of the words (unigrams)
+guardian_data_tokenized_unigrams <- tokenisation_standardisation_unigrams(combined_news)
+
+# Topic Coverage Analysis based on Uni-grams
+top_unigrams <- guardian_data_tokenized_unigrams %>%
+  count(publisher, lemma, sort = TRUE) %>%
+  group_by(publisher) %>%
+  slice_max(n, n = 15) %>%
+  ungroup()
+
+top_unigrams %>%
+  ggplot(aes(x = reorder_within(lemma, n, publisher), y = n, fill = publisher)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~publisher, scales = "free") +
+  scale_x_reordered() +
+  coord_flip() +
+  labs(title = "Top UniGrams by Publisher",
+       x = "UniGram", y = "Frequency") +
+  theme(
+    plot.title = element_text(hjust = 0.5)
+  )
+```
+
+  The unigram comparison shows that both publishers heavily feature terms like “Trump”, “administration”, and “president”, indicating overlapping political focus. However, The Guardian emphasizes trade-related terms like “tariff” and “trade”, while The New York Times features more institutional terms like “court”, “department”, and “judge”, hinting at a stronger legal or bureaucratic framing.
+
+### Top Bigrams
+```{r}
+# Tokenization and Normalization (bigrams)
+tokenisation_standardisation_bigrams <- function(df) {
+  df <- df %>%
+    unnest_tokens(bigram, cleaned_body, token = "ngrams", n = 2) %>%
+    separate(bigram, into = c("word1", "word2"), sep = " ") %>%
+    mutate(
+      word1 = lemmatize_words(word1),
+      word2 = lemmatize_words(word2)
+    ) %>% # Reducing the words to its base form
+    filter(
+      str_length(word1) >= 4, 
+      str_length(word2) >= 4,
+      str_detect(word1, "^[a-z]+$"),
+      str_detect(word2, "^[a-z]+$")
+    ) %>% # Removing words with length < 4 and only words with alphabets
+    anti_join(stop_words, by = c("word1" = "word")) %>% # Handling stopwords
+    anti_join(stop_words, by = c("word2" = "word")) %>% # Handling stopwords
+    unite("bigram", word1, word2, sep = " ")
+}
+
+# Tokenization and Standardisation of the words (bigrams)
+guardian_data_tokenized_bigrams <- tokenisation_standardisation_bigrams(combined_news)
+
+# Topic Coverage Analysis based on Bi-grams
+top_bigrams <- guardian_data_tokenized_bigrams %>%
+  count(publisher, bigram, sort = TRUE) %>%
+  group_by(publisher) %>%
+  slice_max(n, n = 15) %>%
+  ungroup()
+
+# Visualization of top words from the news articles
+top_bigrams %>%
+  ggplot(aes(x = reorder_within(bigram, n, publisher), y = n, fill = publisher)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~publisher, scales = "free") +
+  scale_x_reordered() +
+  coord_flip() +
+  labs(title = "Top BiGrams by Publisher",
+       x = "BiGram", y = "Frequency") +
+  theme(
+    plot.title = element_text(hjust = 0.5)
+  )
+```
+  
+  The bigram analysis shows both publishers frequently mention “trump administration”, “white house”, and “supreme court”, highlighting shared political focus. The Guardian leans toward international and economic themes with terms like “trump tariff” and “prime minister”. In contrast, The New York Times emphasizes institutional and regional references like “report washington” and “district court”.
+  
+### TF-IDF Analysis
+
+TF-IDF identifies words that are uniquely important to each publisher by weighing how frequently a term appears in one set of articles relative to its frequency across all articles.
+
+```{r}
+# Loading required libraries
+library(spacyr)
+# spacy_initialize(model = "en_core_web_sm")
+
+# parse full article bodies
+parsed_articles <- spacy_parse(combined_news$cleaned_body, pos = TRUE, lemma = FALSE)
+
+parsed_articles <- parsed_articles %>% 
+  mutate(doc_id = str_extract_all(doc_id, "[:digit:]+")) %>% 
+  unnest(cols = c(doc_id)) %>% 
+  mutate(doc_id = as.numeric(doc_id))
+
+# join back publisher info
+parsed_articles <- parsed_articles %>% mutate(publisher = combined_news$publisher[doc_id])
+
+# Determining the meaningful words
+meaningful_words <- parsed_articles %>%
+  filter(pos %in% c("NOUN", "VERB", "ADJ", "ADV")) %>%
+  filter(str_length(token) >= 4, str_detect(token, "^[a-z]+$")) %>%
+  anti_join(stop_words, by = c("token" = "word")) %>%
+  count(publisher, token, sort = TRUE)
+
+word_tfidf <- meaningful_words %>%
+  bind_tf_idf(term = token, document = publisher, n = n) %>%
+  arrange(desc(tf_idf))
+
+top_terms <- word_tfidf %>%
+  group_by(publisher) %>%
+  slice_max(tf_idf, n = 15) %>%
+  ungroup()
+
+# Plotting TF-IDF top 15 words unique to each publisher
+ggplot(top_terms, aes(x = reorder_within(token, tf_idf, publisher),
+                      y = tf_idf, fill = publisher)) +
+      geom_col(show.legend = FALSE) +
+      facet_wrap(~ publisher, scales = "free") +
+      coord_flip() +
+      scale_x_reordered() +
+      labs(title = "Top Thematic Words by Publisher (TF-IDF)",
+           x = "Word", y = "TF-IDF Score") +
+      theme(
+        plot.title = element_text(hjust = 0.5)
+      )
+
+```
+
+The TF-IDF comparison highlights distinct thematic focus by each publisher. The Guardian emphasizes terms like “worlds”, “workforce”, and “ceasefire”, pointing to global, economic, and conflict-related coverage. In contrast, The New York Times features terms like “american”, “venezuelan”, and “harvard”, suggesting a stronger focus on national identity, foreign relations, and institutional topics.
+
+## Sentiment Analysis
+
+  To understand how each publisher conveys tone and emotion in their coverage, we conducted sentiment analysis using two widely accepted lexicons: Bing (positive/negative polarity) and NRC (eight basic emotions and sentiment). This allowed us to capture both overall sentiment direction and emotional nuance.
+  
+- Lexicon-Based Analysis: We applied the Bing lexicon to classify words as positive or negative and the NRC lexicon to capture a broader set of emotions like anger, trust, and fear.
+- Overall Sentiment Scores: We computed net sentiment (positive minus negative words) to compare the general tone of coverage across publishers.
+- Day-wise Sentiment Trends: We tracked how sentiment fluctuates over time by aggregating scores at the daily or weekly level.
+- Emotion Facet Charts: Using NRC categories, we visualized the intensity of different emotions (e.g., trust, anger) by publisher to better understand how stories are emotionally framed.
+
+```{r}
+
+# Downloading sentiment lexicons
+sentiment_words_bing <- get_sentiments("bing") # for positive-negative sentiment
+sentiment_words_nrc <- get_sentiments("nrc") # for emotion tracking
+
+# Measuring sentiment of the articles (based on bing lexicon)
+article_sentiment <- combined_news %>%
+  unnest_tokens(word, cleaned_body) %>%
+  inner_join(sentiment_words_bing, by = "word") %>%
+  count(publisher, sentiment) %>%
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>%
+  mutate(net_sentiment = positive - negative)
+
+ggplot(article_sentiment, aes(x = publisher, y = net_sentiment, fill = publisher)) +
+  geom_col(show.legend = FALSE) +
+  labs(title = "Net Sentiment of Articles by Publisher",
+       y = "Net Sentiment (Positive - Negative)", x = "Publisher") +
+  theme(
+        plot.title = element_text(hjust = 0.5)
+      )
+```
+
+The net sentiment analysis reveals a notable contrast: The Guardian's articles are overwhelmingly negative, while The New York Times maintains a more balanced or slightly positive tone overall. This suggests differing editorial approaches or emotional framing in their U.S. news coverage.
+
+```{r}
+# Measuring the sentiment of articles by day
+sentiment_by_day <- combined_news %>%
+  unnest_tokens(word, cleaned_body) %>%
+  inner_join(sentiment_words_bing, by = "word") %>%
+  count(pub_date, publisher, sentiment) %>%
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>%
+  mutate(net_sentiment = positive - negative)
+
+# Plot of the Sentiment of The Gaurdian Articles by Day (also volume of articles)
+article_counts <- combined_news %>% count(pub_date, publisher, name = "article_count") # Measuring counts of articles
+sentiment_by_day <- sentiment_by_day %>% left_join(article_counts, by = c("pub_date", "publisher"))
+
+scale_factor <- max(abs(sentiment_by_day$net_sentiment), na.rm = TRUE) / max(sentiment_by_day$article_count, na.rm = TRUE)
+sentiment_by_day <- sentiment_by_day %>% mutate(scaled_count = article_count * scale_factor)
+
+# Plot with facets for each publisher
+ggplot(sentiment_by_day, aes(x = pub_date)) +
+  geom_col(aes(y = scaled_count), fill = "steelblue", alpha = 0.3) +  # article volume
+  geom_line(aes(y = net_sentiment), color = "darkred", linewidth = 1.1) +  # net sentiment
+  scale_y_continuous(
+    name = "Net Sentiment (Positive - Negative)",
+    sec.axis = sec_axis(~ . * scale_factor, name = "Article Volume")
+  ) +
+  facet_wrap(~ publisher, scales = "free_x") +
+  labs(
+    title = "Net Sentiment and Article Volume Over Time by Publisher",
+    x = "Date"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title.y.left = element_text(color = "darkred"),
+    axis.title.y.right = element_text(color = "steelblue")
+  )
+```
+
+- The Guardian exhibits highly volatile sentiment, with frequent and sharp swings between positive and negative values, and several days dominated by strongly negative tone. This suggests emotionally charged coverage and possibly more critical framing on select days.
+
+- The New York Times, in contrast, maintains a more stable and moderately positive sentiment across most days, showing a less fluctuating editorial tone.
+
+- Article volumes for both publishers remain relatively consistent day-to-day, implying that changes in sentiment are not driven by volume but likely by content tone.
+
+```{r}
+# Tracking emotions per day
+emotion_by_day <- combined_news %>%
+  unnest_tokens(word, cleaned_body) %>%
+  inner_join(sentiment_words_nrc, by = "word", relationship = "many-to-many") %>%
+  count(pub_date, publisher, sentiment)  # `sentiment` includes joy, anger, fear, etc.
+
+# Choose emotions to track
+selected_emotions <- c("anger", "trust", "fear", "joy", "sadness", "anticipation")
+
+# Plot of the Emotions of The Gaurdian Articles by day
+emotion_by_day %>%
+  filter(sentiment %in% selected_emotions) %>%
+  ggplot(aes(x = pub_date, y = n, color = publisher)) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~ sentiment, scales = "free_y", ncol = 2) +
+  labs(
+    title = "Emotion Trends Over Time by Publisher",
+    subtitle = paste("Tracked emotions:", paste(selected_emotions, collapse = ", ")),
+    x = "Date",
+    y = "Emotion Word Count"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5)
+  )
+
+```
+
+- Across all six emotions (anger, fear, sadness, anticipation, trust, and joy), The Guardian consistently uses more emotionally charged language than The New York Times, indicating a higher emotional tone in its coverage.
+- Particularly for fear, sadness, and anger, The Guardian shows sharp peaks and sustained higher word counts, suggesting it often covers topics with more emotionally intense framing.
+- Anticipation and trust also appear more frequently in The Guardian, possibly indicating forward-looking or mobilizing language.
+- The New York Times maintains a more neutral emotional baseline throughout, with much lower word counts and fewer fluctuations across all emotions.
+
+
+## Geography Analysis
+
+  To complement our text based analysis, we explored the geographical spread of news coverage across the United States. Using Named Entity Recognition (NER), we extracted mentions of U.S. cities and states from article bodies published by The Guardian and The New York Times. These location references were then mapped to their respective states and aggregated weekly to assess how different regions received coverage over time. This analysis helps uncover regional focus or disparities in reporting, and provides spatial insight into the narrative emphasis of each publisher’s national news section.
+  
+```{r, message=FALSE, warning=FALSE}
+# Loading required libraries
+library(purrr)
+library(maps)
+library(usdata)
+library(gganimate)
+library(viridis)
+library(gifski)
+
+# Run NLP pipeline on all article text
+parsed_locations <- spacy_extract_entity(
+  combined_news$cleaned_body,
+  entity_type = "GPE"
+)
+
+# Filtering for entities named as "GPE" (Geo-Political Entity ==> Countries, States, details)
+parsed_locations_gpe <- parsed_locations %>% filter(ent_type == "GPE")
+
+parsed_locations_gpe <- parsed_locations_gpe %>%   mutate(text = tolower(text))
+
+parsed_locations_gpe <- parsed_locations_gpe %>%
+  mutate(doc_id = str_extract(doc_id, "\\d+")) %>%
+  mutate(doc_id = as.numeric(doc_id)) %>%
+  left_join(
+    combined_news %>%
+      mutate(doc_id = row_number()) %>%
+      select(doc_id, pub_date, publisher),
+    by = "doc_id"
+  )
+
+data("us.cities", package = "maps")
+
+us_cities_clean <- us.cities %>%
+  mutate(city_clean = tolower(name)) %>%
+  mutate(
+    parts = str_split(city_clean, "\\s+"),
+    state = map_chr(parts, ~ tail(.x, 1)),  # last word as state abbreviation
+    city = map_chr(parts, ~ paste(head(.x, -1), collapse = " "))
+  ) %>%
+  select(city, state, lat, long)
+
+city_matches <- parsed_locations_gpe %>%
+  inner_join(us_cities_clean, by = c("text" = "city"), relationship = "many-to-many")
+
+
+# Aggregate article counts by city and state
+city_summary <- city_matches %>%
+  count(publisher, text, state, lat, long, name = "article_count")
+
+# Aggregate counts at state level (if needed later)
+state_summary <- city_matches %>%
+  count(publisher, state, name = "article_count")
+
+# Load US state boundaries
+us_states <- map_data("state")
+
+ggplot() +
+  geom_polygon(
+    data = us_states,
+    aes(x = long, y = lat, group = group),
+    fill = "gray95", color = "gray80"
+  ) +
+  geom_point(
+    data = city_summary,
+    aes(x = long, y = lat, size = article_count, color = publisher),
+    alpha = 0.7
+  ) +
+  coord_fixed(1.3) +
+  labs(
+    title = "City-Level Article Mentions by Publisher",
+    x = "", y = "",
+    size = "Article Count",
+    color = "Publisher"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "right"
+  )
+```
+
+```{r, eval=FALSE}
+state_summary <- state_summary %>%
+  mutate(region = tolower(abbr2state(state)))  # converts "TX" → "texas"
+
+# Prepare state-wise weekly counts by publisher
+state_weekly <- city_matches %>%
+  mutate(week = floor_date(pub_date, unit = "week")) %>%
+  count(publisher, state, week, name = "article_count") %>%
+  mutate(region = tolower(abbr2state(state)))  # convert state abbreviations to lowercase state names
+
+# Join with US map data
+us_states <- map_data("state")
+map_data_weekly <- us_states %>%
+  left_join(state_weekly, by = "region", relationship = "many-to-many")
+
+map_data_weekly <- map_data_weekly %>%
+  filter(!is.na(week))
+# Animated choropleth plot
+p_anim <- ggplot(map_data_weekly, aes(x = long, y = lat, group = group)) +
+  geom_polygon(aes(fill = article_count), color = "white", linewidth = 0.3) +
+  coord_fixed(1.3) +
+  scale_fill_viridis_c(option = "inferno", direction = -1, na.value = "grey90") +
+  facet_wrap(~ publisher) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    panel.grid = element_blank(),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 14, hjust = 0.5, margin = margin(b = 10)),
+    legend.position = "right"
+  ) +
+  transition_time(week) +
+  labs(
+    title = "Weekly Article Mentions by State",
+    subtitle = "Week of: {frame_time}",
+    fill = "Article Count"
+  ) +
+  ease_aes("linear")
+
+# Export as animated GIF
+animate(p_anim,
+        width = 1000,
+        height = 500,
+        duration = 10,
+        fps = 5,
+        renderer = gifski_renderer("animated_map.gif"))
+```
+
+![Animated Map](animated_map.gif)
+
+# Conclusion
+- **Topic Emphasis:** The Guardian focused more on international affairs and economic issues (e.g., “tariff”, “ceasefire”), while The New York Times emphasized domestic institutions and legal matters (e.g., “court”, “judge”), as shown in both unigram and TF-IDF analyses.
+- **Sentiment Trends:** The Guardian exhibited consistently more negative sentiment, with frequent spikes in anger and fear, whereas The New York Times maintained a steadier, more neutral tone across the study period.
+- **Emotional Framing:** NRC-based emotion analysis revealed that The Guardian's articles used more emotionally charged language, especially around sadness and trust, while The New York Times showed relatively lower emotional variability.
+- **Geographic Coverage:** Geospatial analysis showed both publishers covered similar urban centers, but The Guardian's mentions were more dispersed, while The New York Times showed stronger focus around federal and coastal cities.
+
+These findings confirm that while both publishers report on national U.S. topics, their editorial tone, topic framing, and regional focus diverge significantly potentially shaping public understanding in different ways.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
