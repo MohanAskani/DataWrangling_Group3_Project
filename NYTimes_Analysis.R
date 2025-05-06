@@ -60,13 +60,6 @@ clean_full_body <- function(text) {
     gsub("\\[.*?\\]", "", .) %>%
     gsub("[^A-Za-z .,!?]", " ", .) %>%
     gsub("\n", " ", .) %>%
-    # Tokenization and stopword removal
-    {.} %>%  # Pipe placeholder
-    tibble(text = .) %>%
-    unnest_tokens(word, text) %>%
-    anti_join(get_stopwords(), by = "word") %>%
-    summarise(cleaned = str_c(word, collapse = " ")) %>%
-    pull(cleaned) %>%
     # Final cleaning
     gsub("[,.]", "", .) %>%
     gsub("\\s+", " ", .) %>%
